@@ -1,0 +1,8 @@
+*.zip
+*.user
+/**/.vs/*
+/**/Debug/*
+/**/Release/*
+/**/x64/*
+/**/*build*/*
+/**/.idea/*
