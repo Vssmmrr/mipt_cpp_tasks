@@ -1,9 +1,9 @@
 #ifndef DEQUE_H
 #define DEQUE_H
 
+#include <utility>
 #include <iostream>
 #include <cstdint>
-#include <utility>
 
 template <class T, size_t Capacity>
 class Page {
@@ -82,7 +82,7 @@ public:
             if (size_ == 0) {
                 head_ = 0;
             }
-            buffer_[size_] = value;
+            buffer_[head_ + size_] = value;
             ++size_;
         }
     }
@@ -122,15 +122,9 @@ inline void Copy(const T* source, T* destination, size_t copy_size, size_t head,
     }
 }
 
-template <class T, size_t PageSize>
-class Deque;
-
 template <class T>
 class CircularBuffer {
 private:
-    template <class Other, size_t PageSize>
-    friend class Deque;
-
     size_t size_ = 0;
     size_t capacity_ = 0;
     int head_ = 0;
@@ -150,7 +144,6 @@ private:
     void Reallocate(size_t new_cap) {
         T* tmp = new T[new_cap];
         ::Copy(buffer_, tmp, size_, head_, capacity_);
-        Fill(tmp + size_, tmp + new_cap, T());
         delete[] buffer_;
         capacity_ = new_cap;
         buffer_ = tmp;
@@ -237,7 +230,7 @@ public:
         return buffer_[tail_];
     }
 
-    void RestoreOrDefaultFront() {
+    void PushFront(const T& value) {
         if (size_ == capacity_) {
             Grow();
         }
@@ -245,9 +238,10 @@ public:
             head_ = (head_ - 1 + capacity_) % capacity_;
         }
         ++size_;
+        buffer_[head_] = value;
     }
 
-    void RestoreOrDefaultBack() {
+    void PushBack(const T& value) {
         if (size_ == capacity_) {
             Grow();
         }
@@ -255,15 +249,6 @@ public:
             tail_ = (tail_ + 1) % capacity_;
         }
         ++size_;
-    }
-
-    void PushFront(const T& value) {
-        RestoreOrDefaultFront();
-        buffer_[head_] = value;
-    }
-
-    void PushBack(const T& value) {
-        RestoreOrDefaultBack();
         buffer_[tail_] = value;
     }
 
@@ -297,40 +282,85 @@ public:
     }
 };
 
+template <class T>
+void RotateLeft(T* array, size_t size, size_t rotate_count) {
+    size_t source_start = rotate_count;
+    for (size_t i = 0, cur = source_start; i < cur; ++i) {
+        std::swap(array[i], array[cur]);
+        ++cur;
+        if (cur == size) {
+            cur = source_start;
+        } else if (i == source_start - 1) {
+            source_start = cur;
+        }
+    }
+}
+
 template <class T, size_t PageSize = 100>
 class Deque {
 private:
-    CircularBuffer<Page<T, PageSize>*> pages_;
+    typedef Page<T, PageSize> PageType;
+
+    CircularBuffer<PageType*> pages_;
+    size_t used_head_ = 0;
+    size_t used_tail_ = 0;
     size_t size_ = 0;
+
+    static const size_t kIncreaseFactor = 2;
+
+    size_t UsedPagesCount() const {
+        if (pages_.Empty()) {
+            return 0;
+        }
+        return (used_tail_ + pages_.Size() - used_head_) % pages_.Size() + 1;
+    }
 
     void Copy(const Deque& other) {
         Clear();
-        for (size_t i = 0; i < other.pages_.Size(); ++i) {
+        for (size_t i = 0; i < other.UsedPagesCount(); ++i) {
             EnsureSpaceBack();
-            *pages_.Back() = *other.pages_[i];
+            *pages_[used_tail_] = *other.pages_[(other.used_head_ + i) % other.pages_.Size()];
         }
         size_ = other.size_;
     }
 
+    void AlignHead() {
+        if (used_head_ == 0 || pages_.Empty()) {
+            return;
+        }
+        RotateLeft(&pages_[0], pages_.Size(), used_head_);
+        used_tail_ = UsedPagesCount() - 1;
+        used_head_ = 0;
+    }
+
+    void Grow() {
+        AlignHead();
+        size_t new_pages_cnt = pages_.Size() * kIncreaseFactor;
+        if (new_pages_cnt == 0) {
+            new_pages_cnt = 1;
+        }
+        while (pages_.Size() < new_pages_cnt) {
+            pages_.PushBack(new PageType);
+        }
+    }
+
     void EnsureSpaceFront() {
-        if (pages_.Empty() || !pages_.Front()->IsFront()) {
-            pages_.RestoreOrDefaultFront();
-            if (pages_.Front() == nullptr) {
-                pages_.Front() = new Page<T, PageSize>;
-            } else {
-                pages_.Front()->Clear();
+        if (pages_.Empty() || !pages_[used_head_]->IsFront()) {
+            if (UsedPagesCount() == pages_.Size()) {
+                Grow();
             }
+            used_head_ = (used_head_ + pages_.Size() - 1) % pages_.Size();
+            pages_[used_head_]->Clear();
         }
     }
 
     void EnsureSpaceBack() {
-        if (pages_.Empty() || !pages_.Back()->IsBack()) {
-            pages_.RestoreOrDefaultBack();
-            if (pages_.Back() == nullptr) {
-                pages_.Back() = new Page<T, PageSize>;
-            } else {
-                pages_.Back()->Clear();
+        if (pages_.Empty() || !pages_[used_tail_]->IsBack()) {
+            if (UsedPagesCount() == pages_.Size()) {
+                Grow();
             }
+            used_tail_ = (used_tail_ + 1) % pages_.Size();
+            pages_[used_tail_]->Clear();
         }
     }
 
@@ -338,8 +368,8 @@ public:
     Deque() = default;
 
     ~Deque() {
-        for (size_t i = 0; i < pages_.capacity_; ++i) {
-            delete pages_.buffer_[i];
+        for (size_t i = 0; i < pages_.Size(); ++i) {
+            delete pages_[i];
         }
     }
 
@@ -363,37 +393,39 @@ public:
     }
 
     T& operator[](size_t idx) {
-        if (pages_.Front()->Size() > idx) {
-            return (*pages_.Front())[idx];
+        size_t first_size = pages_[used_head_]->Size();
+        if (first_size > idx) {
+            return (*pages_[used_head_])[idx];
         }
-        size_t page_no = (idx - pages_.Front()->Size()) / PageSize + 1;
-        size_t page_offset = (idx - pages_.Front()->Size()) % PageSize;
-        return (*pages_[page_no])[page_offset];
+        size_t page_no = (idx - first_size) / PageSize + 1;
+        size_t page_offset = (idx - first_size) % PageSize;
+        return (*pages_[(page_no + used_head_) % pages_.Size()])[page_offset];
     }
 
     T operator[](size_t idx) const {
-        if (pages_.Front()->Size() > idx) {
-            return (*pages_.Front())[idx];
+        size_t first_size = pages_[used_head_]->Size();
+        if (first_size > idx) {
+            return (*pages_[used_head_])[idx];
         }
-        size_t page_no = (idx - pages_.Front()->Size()) / PageSize + 1;
-        size_t page_offset = (idx - pages_.Front()->Size()) % PageSize;
-        return (*pages_[page_no])[page_offset];
+        size_t page_no = (idx - first_size) / PageSize + 1;
+        size_t page_offset = (idx - first_size) % PageSize;
+        return (*pages_[(page_no + used_head_) % pages_.Size()])[page_offset];
     }
 
     T& Front() {
-        return pages_.Front()->Front();
+        return pages_[used_head_]->Front();
     }
 
     T Front() const {
-        return pages_.Front()->Front();
+        return pages_[used_head_]->Front();
     }
 
     T& Back() {
-        return pages_.Back()->Back();
+        return pages_[used_tail_]->Back();
     }
 
     T Back() const {
-        return pages_.Back()->Back();
+        return pages_[used_tail_]->Back();
     }
 
     size_t Size() const {
@@ -406,15 +438,15 @@ public:
 
     void PushBack(const T& value) {
         EnsureSpaceBack();
-        pages_.Back()->PushBack(value);
+        pages_[used_tail_]->PushBack(value);
         ++size_;
     }
 
     void PopBack() {
         if (!Empty()) {
-            pages_.Back()->PopBack();
-            if (pages_.Back()->Empty()) {
-                pages_.PopBack();
+            pages_[used_tail_]->PopBack();
+            if (pages_[used_tail_]->Empty() && UsedPagesCount() > 1) {
+                used_tail_ = (used_tail_ + pages_.Size() - 1) % pages_.Size();
             }
             --size_;
         }
@@ -422,23 +454,27 @@ public:
 
     void PushFront(const T& value) {
         EnsureSpaceFront();
-        pages_.Front()->PushFront(value);
+        pages_[used_head_]->PushFront(value);
         ++size_;
     }
 
     void PopFront() {
         if (size_ > 0) {
-            pages_.Front()->PopFront();
-            if (pages_.Front()->Empty()) {
-                pages_.PopFront();
+            pages_[used_head_]->PopFront();
+            if (pages_[used_head_]->Empty() && UsedPagesCount() > 1) {
+                used_head_ = (used_head_ + 1) % pages_.Size();
             }
             --size_;
         }
     }
 
     void Clear() {
-        pages_.Clear();
         size_ = 0;
+        used_tail_ = 0;
+        used_head_ = 0;
+        if (!pages_.Empty()) {
+            pages_[0]->Clear();
+        }
     }
 };
 
